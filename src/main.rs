@@ -3,9 +3,7 @@ use bluer::{
     rfcomm::{SocketAddr, Stream},
     Address,
 };
-use chrono::Utc;
 use clap::Parser;
-use influxdb::{Client, InfluxDbWriteable, Timestamp};
 use ini::Ini;
 use simplelog::*;
 use std::io::{self, Error, ErrorKind};
@@ -14,6 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
+use tokio_postgres::NoTls;
 
 /// secs between polling
 pub const POLL_INTERVAL_SECS: f32 = 10.0;
@@ -73,6 +72,15 @@ impl Parameter {
             convert,
         }
     }
+}
+
+#[derive(Clone)]
+pub struct Database {
+    pub name: String,
+    pub host: String,
+    pub dbname: String,
+    pub username: String,
+    pub password: String,
 }
 
 fn create_params_table() -> Vec<Parameter> {
@@ -206,29 +214,27 @@ pub async fn send_cmd(stream: &mut Stream, cmd: String) -> io::Result<Option<Vec
     Ok(out)
 }
 
-async fn influx_save_param(client: influxdb::Client, name: &str, val: f32) -> Result<()> {
-    // construct a write query
-    let mut write_query = Timestamp::from(Utc::now()).into_query("params");
-    write_query = write_query.add_field(name, val);
-
-    // send query to influxdb
-    let write_result = client.query(&write_query).await;
-    match write_result {
-        Ok(msg) => {
-            debug!("influxdb write success: {:?}", msg);
-        }
-        Err(e) => {
-            error!("influxdb write error: {:?}", e);
-        }
+async fn influx_save_param(
+    client: &mut tokio_postgres::Client,
+    name: &str,
+    val: f32,
+) -> Result<()> {
+    if let Err(e) = client
+        .execute(
+            &format!("INSERT INTO {name} (value) VALUES ($1)"),
+            &[&(val as f64)],
+        )
+        .await
+    {
+        error!("postgres: error inserting: {:?}", e);
     }
-
     Ok(())
 }
 
 pub async fn get_param(
     stream: &mut Stream,
     p: &Parameter,
-    client: influxdb::Client,
+    client: &mut tokio_postgres::Client,
 ) -> io::Result<()> {
     let cmd = format!("ATSH{:02x}\r", p.reg_address2);
     send_cmd(stream, cmd).await?;
@@ -268,6 +274,25 @@ pub async fn get_param(
     Ok(())
 }
 
+fn config_read_postgres(conf: Ini) -> std::result::Result<Database, Box<dyn std::error::Error>> {
+    match conf.section(Some("postgres".to_owned())) {
+        Some(section) => Ok(Database {
+            name: "🦏 postgres".to_string(),
+            host: section.get("host").ok_or("missing `host`")?.to_string(),
+            dbname: section.get("dbname").ok_or("missing `dbname`")?.to_string(),
+            username: section
+                .get("username")
+                .ok_or("missing `username`")?
+                .to_string(),
+            password: section
+                .get("password")
+                .ok_or("missing `password`")?
+                .to_string(),
+        }),
+        None => Err("missing [postgres] config section")?,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -282,8 +307,17 @@ async fn main() -> Result<()> {
         }
     };
     let mac = get_config_string(conf.clone(), "mac", None)?;
-    let influxdb_url = get_config_string(conf.clone(), "url", Some("influxdb"))?;
-    let influxdb_db = get_config_string(conf.clone(), "db", Some("influxdb"))?;
+
+    let db = match config_read_postgres(conf.clone()) {
+        Ok(db) => db,
+        Err(e) => {
+            return Err(format!("Config error [postgres]: {}", e).into());
+        }
+    };
+    let connectionstring = format!(
+        "postgres://{}:{}@{}/{}",
+        db.username, db.password, db.host, db.dbname
+    );
 
     //parse target mac address for bluetooth
     let target_addr: Address = mac.parse().expect("invalid address");
@@ -299,7 +333,15 @@ async fn main() -> Result<()> {
 
     let params = create_params_table();
     let mut poll_interval = Instant::now();
-    let client = Client::new(influxdb_url, influxdb_db);
+
+    let (mut client, connection) = tokio_postgres::connect(&connectionstring, NoTls).await?;
+    // The connection object performs the actual communication with the database,
+    // so spawn it off to run on its own.
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            error!("connection error: {}", e);
+        }
+    });
 
     'connect: loop {
         if !running.load(Ordering::SeqCst) {
@@ -353,7 +395,7 @@ async fn main() -> Result<()> {
 
                 for p in &params {
                     debug!("Trying to obtain: {} ({})", p.desc, p.name);
-                    if let Err(e) = get_param(&mut stream, p, client.clone()).await {
+                    if let Err(e) = get_param(&mut stream, p, &mut client).await {
                         info!("GET PARAM error for: {}: {:?}", p.name, e);
                         if e.kind() == std::io::ErrorKind::AddrNotAvailable {
                             info!("CAN network down / car is sleeping... waiting 100s");
