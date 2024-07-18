@@ -255,6 +255,9 @@ pub async fn get_param(
     debug!("got response for {}: {}", p.name, raw_string);
 
     //get an u32 value from a response hex string
+    if raw_string.len() < 6 {
+        return Err(Error::new(ErrorKind::Other, "response empty or too short!"));
+    }
     let val = u32::from_str_radix(&raw_string[raw_string.len() - 6..raw_string.len()], 16);
     if let Err(_) = val {
         return Err(Error::new(ErrorKind::Other, "conversion error!"));
