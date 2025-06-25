@@ -100,7 +100,7 @@ fn create_params_table() -> Vec<Parameter> {
                 Ok(x)
             }),
         ),
-        Parameter::new(
+        /*Parameter::new(
             "odometer",
             "Total vehicle distance",
             Some("km"),
@@ -131,7 +131,7 @@ fn create_params_table() -> Vec<Parameter> {
                     .ok_or(Error::new(ErrorKind::AddrNotAvailable, "substract error"))?)
                     as f32)
             }),
-        ),
+        ),*/
     ]
 }
 
