@@ -234,7 +234,7 @@ async fn influx_save_param(
 pub async fn get_param(
     stream: &mut Stream,
     p: &Parameter,
-    client: &mut tokio_postgres::Client,
+    //client: &mut tokio_postgres::Client,
 ) -> io::Result<()> {
     let cmd = format!("ATSH{:02x}\r", p.reg_address2);
     send_cmd(stream, cmd).await?;
@@ -272,7 +272,7 @@ pub async fn get_param(
         converted,
         p.unit.unwrap_or_default()
     );
-    let _ = influx_save_param(client, &p.name, converted).await;
+    //let _ = influx_save_param(client, &p.name, converted).await;
 
     Ok(())
 }
@@ -337,14 +337,14 @@ async fn main() -> Result<()> {
     let params = create_params_table();
     let mut poll_interval = Instant::now();
 
-    let (mut client, connection) = tokio_postgres::connect(&connectionstring, NoTls).await?;
+    /*let (mut client, connection) = tokio_postgres::connect(&connectionstring, NoTls).await?;
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
     tokio::spawn(async move {
         if let Err(e) = connection.await {
             error!("connection error: {}", e);
         }
-    });
+    });*/
 
     'connect: loop {
         if !running.load(Ordering::SeqCst) {
@@ -398,7 +398,7 @@ async fn main() -> Result<()> {
 
                 for p in &params {
                     debug!("Trying to obtain: {} ({})", p.desc, p.name);
-                    if let Err(e) = get_param(&mut stream, p, &mut client).await {
+                    if let Err(e) = get_param(&mut stream, p/*, &mut client*/).await {
                         info!("GET PARAM error for: {}: {:?}", p.name, e);
                         if e.kind() == std::io::ErrorKind::AddrNotAvailable {
                             info!("CAN network down / car is sleeping... waiting 100s");
