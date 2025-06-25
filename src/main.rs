@@ -28,6 +28,14 @@ const _EOM3: u8 = b'?';
 // async contexts needs some extra restrictions
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+use reqwest::Client;
+use serde::Serialize;
+
+#[derive(Debug, Serialize)]
+struct BatteryData {
+    battery_level: f32,
+}
+
 /// Simple daemon to read Renault Zoe basic parameters using
 /// bluetooth dongle and save it in the InfluxDB database
 #[derive(Parser, Debug)]
@@ -214,6 +222,27 @@ pub async fn send_cmd(stream: &mut Stream, cmd: String) -> io::Result<Option<Vec
     Ok(out)
 }
 
+async fn rest_save_param(
+    client: &mut reqwest::Client,
+    name: &str,
+    val: f32,
+) -> Result<()> {
+    // fill JSON struct
+    let data = BatteryData {
+        battery_level: val,
+    };
+
+    let response = client
+        .post("http://localhost:3030/battery")
+        .json(&data)
+        .send()
+        .await?;
+
+    info!("Response: {}", response.text().await?);
+
+    Ok(())
+}
+
 async fn influx_save_param(
     client: &mut tokio_postgres::Client,
     name: &str,
@@ -234,7 +263,7 @@ async fn influx_save_param(
 pub async fn get_param(
     stream: &mut Stream,
     p: &Parameter,
-    //client: &mut tokio_postgres::Client,
+    client: &mut reqwest::Client,
 ) -> io::Result<()> {
     let cmd = format!("ATSH{:02x}\r", p.reg_address2);
     send_cmd(stream, cmd).await?;
@@ -273,6 +302,7 @@ pub async fn get_param(
         p.unit.unwrap_or_default()
     );
     //let _ = influx_save_param(client, &p.name, converted).await;
+    let _ = rest_save_param(client, &p.name, converted).await;
 
     Ok(())
 }
@@ -345,6 +375,7 @@ async fn main() -> Result<()> {
             error!("connection error: {}", e);
         }
     });*/
+    let mut client = Client::new();
 
     'connect: loop {
         if !running.load(Ordering::SeqCst) {
@@ -398,7 +429,7 @@ async fn main() -> Result<()> {
 
                 for p in &params {
                     debug!("Trying to obtain: {} ({})", p.desc, p.name);
-                    if let Err(e) = get_param(&mut stream, p/*, &mut client*/).await {
+                    if let Err(e) = get_param(&mut stream, p, &mut client).await {
                         info!("GET PARAM error for: {}: {:?}", p.name, e);
                         if e.kind() == std::io::ErrorKind::AddrNotAvailable {
                             info!("CAN network down / car is sleeping... waiting 100s");
