@@ -33,7 +33,7 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 struct BatteryData {
-    battery_level: f32,
+    battery_level_percentage: f32,
 }
 
 /// Simple daemon to read Renault Zoe basic parameters using
@@ -229,11 +229,11 @@ async fn rest_save_param(
 ) -> Result<()> {
     // fill JSON struct
     let data = BatteryData {
-        battery_level: val,
+        battery_level_percentage: val,
     };
 
     let response = client
-        .post("http://localhost:3030/battery")
+        .post("http://localhost/battery")
         .json(&data)
         .send()
         .await?;
