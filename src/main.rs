@@ -18,7 +18,8 @@ pub const POLL_INTERVAL_SECS: f32 = 10.0;
 // Secs between polling when car is in sleep mode or is not in range
 pub const CAR_SLEEP_INTERVAL_SECS: f32 = 100.0;
 
-const INIT: &[&str] = &["ATZ", "ATE0", "ATAL", "ATCP18", "ATFCSD300000", "ATSP6"];
+// Universal ELM327 initialization commands
+const INIT: &[&str] = &["ATZ", "ATE0", "ATAL", "ATST96", "ATCP18", "ATFCSD300000", "ATSP6"];
 const _EOM1: u8 = b'\r';
 const EOM2: u8 = b'>';
 const _EOM3: u8 = b'?';
@@ -30,9 +31,12 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 use reqwest::Client;
 use serde::Serialize;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default, Clone)]
 struct BatteryData {
-    battery_level_percentage: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    battery_level_percentage: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    external_temp_celsius: Option<f32>,
 }
 
 /// Simple daemon to read Renault Zoe basic parameters using
@@ -56,7 +60,7 @@ pub struct Parameter {
     cmd: u32,
     reg_address: u16,
     reg_address2: u16,
-    convert: Box<dyn Fn(u32) -> io::Result<f32>>,
+    convert: Box<dyn Fn(&str) -> io::Result<f32>>,
 }
 
 impl Parameter {
@@ -67,7 +71,7 @@ impl Parameter {
         cmd: u32,
         reg_address: u16,
         reg_address2: u16,
-        convert: Box<dyn Fn(u32) -> io::Result<f32>>,
+        convert: Box<dyn Fn(&str) -> io::Result<f32>>,
     ) -> Self {
         Self {
             name: String::from(name),
@@ -81,7 +85,8 @@ impl Parameter {
     }
 }
 
-fn create_params_table() -> Vec<Parameter> {
+/// Create the parameter list for a Renault Zoe
+fn create_zoe_params_table() -> Vec<Parameter> {
     vec![
         Parameter::new(
             "soc",
@@ -90,7 +95,10 @@ fn create_params_table() -> Vec<Parameter> {
             0x222002,
             0x7ec,
             0x7e4,
-            Box::new(|val| {
+            Box::new(|raw| {
+                let filtered: String = raw.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+                if filtered.len() < 6 { return Err(Error::new(ErrorKind::InvalidData, "response empty or too short!")); }
+                let val = u32::from_str_radix(&filtered[filtered.len() - 6..], 16).map_err(|_| Error::new(ErrorKind::InvalidData, "conversion error"))?;
                 let x: f32 = (val - 0x20000) as f32 * 0.02;
                 if x == 0.0 {
                     return Err(Error::new(ErrorKind::AddrNotAvailable, "CAN network down"));
@@ -156,12 +164,12 @@ fn logging_init(debug: bool) {
     CombinedLogger::init(loggers).expect("Cannot initialize logging subsystem");
 }
 
-fn get_config_string(conf: Ini, option_name: &str, section: Option<&str>) -> io::Result<String> {
+fn get_config_string(conf: &Ini, option_name: &str, section: Option<&str>) -> io::Result<String> {
     conf.section(Some(section.unwrap_or("general").to_owned()))
         .and_then(|x| x.get(option_name).cloned())
         .ok_or(Error::new(
-            ErrorKind::Other,
-            format!("No config entry for: `{option_name}`"),
+            ErrorKind::NotFound,
+            format!("No config entry for: `{}` in section `[{}]`", option_name, section.unwrap_or("general")),
         ))
 }
 
@@ -212,15 +220,13 @@ pub async fn send_cmd(stream: &mut Stream, cmd: String) -> io::Result<Option<Vec
     Ok(out)
 }
 
-async fn rest_save_param(client: &mut reqwest::Client, name: &str, val: f32) -> Result<()> {
-    // fill JSON struct
-    let data = BatteryData {
-        battery_level_percentage: val,
-    };
-
+async fn rest_save_param(
+    client: &mut reqwest::Client,
+    data: &BatteryData,
+) -> Result<()> {
     let response = client
         .post("http://localhost/battery")
-        .json(&data)
+        .json(data)
         .send()
         .await?;
 
@@ -232,8 +238,8 @@ async fn rest_save_param(client: &mut reqwest::Client, name: &str, val: f32) -> 
 pub async fn get_param(
     stream: &mut Stream,
     p: &Parameter,
-    client: &mut reqwest::Client,
-) -> io::Result<()> {
+    _client: &mut reqwest::Client,
+) -> io::Result<f32> {
     let cmd = format!("ATSH{:02x}\r", p.reg_address2);
     send_cmd(stream, cmd).await?;
     let cmd = format!("ATCRA{:02x}\r", p.reg_address);
@@ -244,24 +250,9 @@ pub async fn get_param(
     let _ = send_cmd(stream, cmd).await;
     let cmd = format!("{:02x}\r", p.cmd);
     let out = send_cmd(stream, cmd).await?.unwrap();
-    let mut raw_string = String::from_utf8_lossy(&out);
-    raw_string = raw_string
-        .chars()
-        .filter(|c| c.is_ascii_hexdigit())
-        .collect::<String>()
-        .into();
-    debug!("got response for {}: {}", p.name, raw_string);
+    let raw_string = String::from_utf8_lossy(&out);
 
-    //get an u32 value from a response hex string
-    if raw_string.len() < 6 {
-        return Err(Error::new(ErrorKind::Other, "response empty or too short!"));
-    }
-    let val = u32::from_str_radix(&raw_string[raw_string.len() - 6..raw_string.len()], 16);
-    if let Err(_) = val {
-        return Err(Error::new(ErrorKind::Other, "conversion error!"));
-    }
-    //use an associated parameter converter for a value
-    let converted = (p.convert)(val.unwrap())?;
+    let converted = (p.convert)(&raw_string)?;
 
     info!(
         "{} ({}): {} {}",
@@ -270,10 +261,8 @@ pub async fn get_param(
         converted,
         p.unit.unwrap_or_default()
     );
-    //let _ = influx_save_param(client, &p.name, converted).await;
-    let _ = rest_save_param(client, &p.name, converted).await;
 
-    Ok(())
+    Ok(converted)
 }
 
 #[tokio::main]
@@ -289,7 +278,18 @@ async fn main() -> Result<()> {
             return Ok(());
         }
     };
-    let mac = get_config_string(conf.clone(), "mac", None)?;
+    let mac = get_config_string(&conf, "mac", Some("general"))?;
+    let car_model = get_config_string(&conf, "car", Some("general"))?;
+
+    info!("Configured for car model: <b><green>{}</>", &car_model);
+    let params = match car_model.as_str() {
+        "Zoe" => create_zoe_params_table(),
+        _ => {
+            let err_msg = format!("Unsupported car model in config: {}", car_model);
+            error!("{}", err_msg);
+            return Err(err_msg.into());
+        }
+    };
 
     // Parse target mac address for bluetooth
     let target_addr: Address = mac.parse().expect("invalid address");
@@ -303,7 +303,6 @@ async fn main() -> Result<()> {
     })
     .expect("Error setting Ctrl-C handler");
 
-    let params = create_params_table();
     let mut poll_interval = Instant::now();
 
     let mut client = Client::new();
@@ -358,25 +357,36 @@ async fn main() -> Result<()> {
             if poll_interval.elapsed() > Duration::from_secs(0) {
                 poll_interval = Instant::now() + Duration::from_secs_f32(POLL_INTERVAL_SECS);
 
+                let mut data = BatteryData::default();
                 for p in &params {
                     debug!("Trying to obtain: {} ({})", p.desc, p.name);
-                    if let Err(e) = get_param(&mut stream, p, &mut client).await {
-                        info!("GET PARAM error for: {}: {:?}", p.name, e);
-                        if e.kind() == std::io::ErrorKind::AddrNotAvailable {
-                            info!("CAN network down / car is sleeping... waiting 100s");
-                            poll_interval =
-                                Instant::now() + Duration::from_secs_f32(CAR_SLEEP_INTERVAL_SECS);
-                            continue 'inner;
+                    match get_param(&mut stream, p, &mut client).await {
+                        Ok(val) => {
+                            if p.name == "soc" {
+                                data.battery_level_percentage = Some(val);
+                            } else if p.name == "external_temp" {
+                                data.external_temp_celsius = Some(val);
+                            }
                         }
-                        if e.kind() == std::io::ErrorKind::BrokenPipe
-                            || e.kind() == std::io::ErrorKind::TimedOut
-                            || e.kind() == std::io::ErrorKind::NotConnected
-                        {
-                            info!("Broken pipe/TimedOut/NotConnected detected ... trying to reconnect");
-                            continue 'connect;
+                        Err(e) => {
+                            info!("GET PARAM error for: {}: {:?}", p.name, e);
+                            if e.kind() == std::io::ErrorKind::AddrNotAvailable {
+                                info!("CAN network down / car is sleeping... waiting 100s");
+                                poll_interval =
+                                    Instant::now() + Duration::from_secs_f32(CAR_SLEEP_INTERVAL_SECS);
+                                continue 'inner;
+                            }
+                            if e.kind() == std::io::ErrorKind::BrokenPipe
+                                || e.kind() == std::io::ErrorKind::TimedOut
+                                || e.kind() == std::io::ErrorKind::NotConnected
+                            {
+                                info!("Broken pipe/TimedOut/NotConnected detected ... trying to reconnect");
+                                continue 'connect;
+                            }
                         }
                     }
                 }
+                let _ = rest_save_param(&mut client, &data).await;
                 debug!("Got all params, sleeping 10 secs for next cycle");
             }
 
