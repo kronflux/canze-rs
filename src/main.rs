@@ -12,6 +12,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
+use std::collections::HashMap;
+
+mod config;
+use config::{VehicleConfig, PidConfig, MetricConfig};
 
 // Secs between polling
 pub const POLL_INTERVAL_SECS: f32 = 10.0;
@@ -24,8 +28,6 @@ const _EOM1: u8 = b'\r';
 const EOM2: u8 = b'>';
 const _EOM3: u8 = b'?';
 
-// Just a generic Result type to ease error handling for us. Errors in multithreaded
-// async contexts needs some extra restrictions
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 use reqwest::Client;
@@ -39,188 +41,26 @@ struct BatteryData {
     external_temp_celsius: Option<f32>,
 }
 
-/// Simple daemon to read Renault Zoe basic parameters using
-/// bluetooth dongle and save it in the InfluxDB database
+#[derive(Debug, Serialize, Default, Clone)]
+struct OdometerData {
+    odometer_km: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trip_km: Option<f32>,
+}
+
+#[derive(Debug, Serialize, Default, Clone)]
+struct TirePressureData {
+    pressures_kpa: Vec<f32>,
+}
+
 #[derive(Parser, Debug)]
 #[clap(version, about, long_about = None)]
 struct Args {
-    /// Enable debug info
     #[clap(short, long)]
     debug: bool,
 
-    /// Config file path
     #[clap(short, long, parse(from_os_str), default_value = "/etc/canze-rs.conf")]
     config: std::path::PathBuf,
-}
-
-pub struct Parameter {
-    name: String,
-    desc: String,
-    unit: Option<&'static str>,
-    cmd: u32,
-    reg_address: u16,
-    reg_address2: u16,
-    convert: Box<dyn Fn(&str) -> io::Result<f32>>,
-}
-
-impl Parameter {
-    pub fn new(
-        name: &'static str,
-        desc: &'static str,
-        unit: Option<&'static str>,
-        cmd: u32,
-        reg_address: u16,
-        reg_address2: u16,
-        convert: Box<dyn Fn(&str) -> io::Result<f32>>,
-    ) -> Self {
-        Self {
-            name: String::from(name),
-            desc: String::from(desc),
-            unit,
-            cmd,
-            reg_address,
-            reg_address2,
-            convert,
-        }
-    }
-}
-
-/// Create the parameter list for a Renault Zoe
-fn create_zoe_params_table() -> Vec<Parameter> {
-    vec![
-        Parameter::new(
-            "soc",
-            "SOC",
-            Some("%"),
-            0x222002,
-            0x7ec,
-            0x7e4,
-            Box::new(|raw| {
-                let filtered: String = raw.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-                if filtered.len() < 6 { return Err(Error::new(ErrorKind::InvalidData, "response empty or too short!")); }
-                let val = u32::from_str_radix(&filtered[filtered.len() - 6..], 16).map_err(|_| Error::new(ErrorKind::InvalidData, "conversion error"))?;
-                let x: f32 = (val - 0x20000) as f32 * 0.02;
-                if x == 0.0 {
-                    return Err(Error::new(ErrorKind::AddrNotAvailable, "CAN network down"));
-                }
-                Ok(x)
-            }),
-        ),
-        /*Parameter::new(
-            "odometer",
-            "Total vehicle distance",
-            Some("km"),
-            0x222006,
-            0x7ec,
-            0x7e4,
-            Box::new(|val| Ok(val as f32)),
-        ),
-        Parameter::new(
-            "soh",
-            "SOH",
-            Some("%"),
-            0x223206,
-            0x7ec,
-            0x7e4,
-            Box::new(|val| Ok((val & 0xffff) as f32 * 0.05)),
-        ),
-        Parameter::new(
-            "active_power",
-            "Mains active power consumed",
-            Some("W"),
-            0x22504A,
-            0x793,
-            0x792,
-            Box::new(|val| {
-                Ok(((val & 0xffff)
-                    .checked_sub(20000)
-                    .ok_or(Error::new(ErrorKind::AddrNotAvailable, "substract error"))?)
-                    as f32)
-            }),
-        ),*/
-    ]
-}
-
-// Create parameter list for the Hyundai Ioniq 5
-fn create_ioniq_params_table() -> Vec<Parameter> {
-    vec![
-        Parameter::new(
-            "ioniq_soc",
-            "Ioniq State of Charge",
-            Some("%"),
-            0x220105, // PID for Ioniq SOC
-            0x7EC,    // Response address from ECU
-            0x7E4,    // ECU address (for ATSH command)
-            Box::new(|raw| {
-                let line = raw.split(|c| c == '\r' || c == '\n').find(|l| l.trim().starts_with("5:")).ok_or_else(|| Error::new(ErrorKind::InvalidData, format!("Missing line 5. Raw: {:?}", raw)))?;
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() < 2 { return Err(Error::new(ErrorKind::InvalidData, format!("Invalid format in line: {:?}", line))); }
-                let val = u32::from_str_radix(parts[1], 16).map_err(|_| Error::new(ErrorKind::InvalidData, format!("Hex parse error in line: {:?}", line)))?;
-                let x: f32 = val as f32 / 2.0;
-                if x == 0.0 {
-                    return Err(Error::new(ErrorKind::AddrNotAvailable, "CAN network down"));
-                }
-                Ok(x)
-            }),
-        ),
-        Parameter::new(
-            "external_temp",
-            "Outside Temperature",
-            Some("C"),
-            0x220100, 
-            0x7BB,    // ACU response    
-            0x7B3,    // ACU ECU
-            Box::new(|raw| {
-                let line = raw.split(|c| c == '\r' || c == '\n').find(|l| l.trim().starts_with("1:")).ok_or_else(|| Error::new(ErrorKind::InvalidData, format!("Missing line 1. Raw: {:?}", raw)))?;
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() < 5 { return Err(Error::new(ErrorKind::InvalidData, format!("Invalid format in line: {:?}", line))); }
-                let val = u32::from_str_radix(parts[4], 16).map_err(|_| Error::new(ErrorKind::InvalidData, format!("Hex parse error in line: {:?}", line)))?;
-                let x: f32 = (val as f32 / 2.0) - 40.0;
-                Ok(x)
-            }),
-        ),
-    ]
-}
-
-// Create parameter list for the Kia EV6
-fn create_ev6_params_table() -> Vec<Parameter> {
-    vec![
-        Parameter::new(
-            "ev6_soc",
-            "EV6 State of Charge",
-            Some("%"),
-            0x220105, // PID for EV6 SOC
-            0x7EC,    // Response address from ECU
-            0x7E4,    // ECU address (for ATSH command)
-            Box::new(|raw| {
-                let line = raw.split(|c| c == '\r' || c == '\n').find(|l| l.trim().starts_with("5:")).ok_or_else(|| Error::new(ErrorKind::InvalidData, format!("Missing line 5. Raw: {:?}", raw)))?;
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() < 2 { return Err(Error::new(ErrorKind::InvalidData, format!("Invalid format in line: {:?}", line))); }
-                let val = u32::from_str_radix(parts[1], 16).map_err(|_| Error::new(ErrorKind::InvalidData, format!("Hex parse error in line: {:?}", line)))?;
-                let x: f32 = val as f32 / 2.0;
-                if x == 0.0 {
-                    return Err(Error::new(ErrorKind::AddrNotAvailable, "CAN network down"));
-                }
-                Ok(x)
-            }),
-        ),
-        Parameter::new(
-            "external_temp",
-            "Outside Temperature",
-            Some("C"),
-            0x220100, 
-            0x7BB,    // ACU response    
-            0x7B3,    // ACU ECU
-            Box::new(|raw| {
-                let line = raw.split(|c| c == '\r' || c == '\n').find(|l| l.trim().starts_with("1:")).ok_or_else(|| Error::new(ErrorKind::InvalidData, format!("Missing line 1. Raw: {:?}", raw)))?;
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() < 5 { return Err(Error::new(ErrorKind::InvalidData, format!("Invalid format in line: {:?}", line))); }
-                let val = u32::from_str_radix(parts[4], 16).map_err(|_| Error::new(ErrorKind::InvalidData, format!("Hex parse error in line: {:?}", line)))?;
-                let x: f32 = (val as f32 / 2.0) - 40.0;
-                Ok(x)
-            }),
-        ),
-    ]
 }
 
 fn logging_init(debug: bool) {
@@ -232,11 +72,7 @@ fn logging_init(debug: bool) {
     let mut loggers = vec![];
 
     let console_logger: Box<dyn SharedLogger> = TermLogger::new(
-        if debug {
-            LevelFilter::Debug
-        } else {
-            LevelFilter::Info
-        },
+        if debug { LevelFilter::Debug } else { LevelFilter::Info },
         conf.clone(),
         TerminalMode::Mixed,
         ColorChoice::Auto,
@@ -256,7 +92,7 @@ fn get_config_string(conf: &Ini, option_name: &str, section: Option<&str>) -> io
 }
 
 pub async fn send_cmd(stream: &mut Stream, cmd: String) -> io::Result<Option<Vec<u8>>> {
-    let mut buffer = vec![0u8; 512];
+    let mut buffer = vec![0u8; 1024];
     let mut output_cmd: Vec<u8> = vec![];
     let out: Option<Vec<u8>>;
 
@@ -302,49 +138,83 @@ pub async fn send_cmd(stream: &mut Stream, cmd: String) -> io::Result<Option<Vec
     Ok(out)
 }
 
-async fn rest_save_param(
-    client: &mut reqwest::Client,
-    data: &BatteryData,
-) -> Result<()> {
-    let response = client
-        .post("http://localhost/battery")
-        .json(data)
-        .send()
-        .await?;
+pub fn get_payload(response: &str) -> Vec<u8> {
+    let frames: Vec<&str> = response.split(|c| c == '\r' || c == '\n')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter(|s| !s.contains("SEARCHING"))
+        .collect();
 
-    info!("Response: {}", response.text().await?);
+    let mut payload = Vec::new();
+    let mut is_first = true;
 
-    Ok(())
+    for frame in frames {
+        let data_str = if frame.contains(':') {
+            frame.split(':').nth(1).unwrap()
+        } else {
+            frame
+        };
+        
+        if is_first && data_str.len() <= 3 {
+            is_first = false;
+            continue;
+        }
+        is_first = false;
+
+        let mut chars = data_str.chars();
+        while let (Some(c1), Some(c2)) = (chars.next(), chars.next()) {
+            let hex_str = format!("{}{}", c1, c2);
+            if let Ok(b) = u8::from_str_radix(&hex_str, 16) {
+                payload.push(b);
+            }
+        }
+    }
+    payload
 }
 
-pub async fn get_param(
+pub fn extract_value(payload: &[u8], metric: &MetricConfig) -> Option<f32> {
+    let idx = if metric.byte_index < 0 {
+        let positive_idx = payload.len() as i32 + metric.byte_index;
+        if positive_idx < 0 { return None; }
+        positive_idx as usize
+    } else {
+        metric.byte_index as usize
+    };
+
+    if idx + metric.length > payload.len() {
+        return None;
+    }
+
+    let raw_val = match metric.length {
+        1 => payload[idx] as f32,
+        2 => u16::from_be_bytes([payload[idx], payload[idx+1]]) as f32,
+        3 => {
+            let val = ((payload[idx] as u32) << 16) | ((payload[idx+1] as u32) << 8) | (payload[idx+2] as u32);
+            val as f32
+        },
+        _ => return None,
+    };
+
+    Some((raw_val * metric.multiplier) + metric.offset)
+}
+
+pub async fn get_raw_pid(
     stream: &mut Stream,
-    p: &Parameter,
-    _client: &mut reqwest::Client,
-) -> io::Result<f32> {
-    let cmd = format!("ATSH{:02x}\r", p.reg_address2);
+    p: &PidConfig,
+) -> io::Result<Vec<u8>> {
+    let cmd = format!("ATSH{}\r", p.ecu_tx);
     send_cmd(stream, cmd).await?;
-    let cmd = format!("ATCRA{:02x}\r", p.reg_address);
+    let cmd = format!("ATCRA{}\r", p.ecu_rx);
     send_cmd(stream, cmd).await?;
-    let cmd = format!("ATFCSH{:02x}\r", p.reg_address2);
+    let cmd = format!("ATFCSH{}\r", p.ecu_tx);
     send_cmd(stream, cmd).await?;
     let cmd = format!("10C0\r");
     let _ = send_cmd(stream, cmd).await;
-    let cmd = format!("{:02x}\r", p.cmd);
+    let cmd = format!("{}\r", p.pid);
     let out = send_cmd(stream, cmd).await?.unwrap();
     let raw_string = String::from_utf8_lossy(&out);
 
-    let converted = (p.convert)(&raw_string)?;
-
-    info!(
-        "{} ({}): {} {}",
-        p.desc,
-        p.name,
-        converted,
-        p.unit.unwrap_or_default()
-    );
-
-    Ok(converted)
+    Ok(get_payload(&raw_string))
 }
 
 #[tokio::main]
@@ -364,20 +234,20 @@ async fn main() -> Result<()> {
     let car_model = get_config_string(&conf, "car", Some("general"))?;
 
     info!("Configured for car model: <b><green>{}</>", &car_model);
-    let params = match car_model.as_str() {
-        "Zoe" => create_zoe_params_table(),
-        _ => {
-            let err_msg = format!("Unsupported car model in config: {}", car_model);
-            error!("{}", err_msg);
-            return Err(err_msg.into());
+    
+    // Load vehicle JSON profile
+    let vehicle_cfg = match VehicleConfig::load(&car_model) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to load vehicle JSON profile: {}", e);
+            return Err(e.into());
         }
     };
+    info!("Successfully loaded profile for: {}", vehicle_cfg.name);
 
-    // Parse target mac address for bluetooth
     let target_addr: Address = mac.parse().expect("invalid address");
     let target_sa = SocketAddr::new(target_addr, 1u8);
 
-    // Ctrl-C / SIGTERM support
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
     ctrlc::set_handler(move || {
@@ -386,12 +256,11 @@ async fn main() -> Result<()> {
     .expect("Error setting Ctrl-C handler");
 
     let mut poll_interval = Instant::now();
-
-    let mut client = Client::new();
+    let client = Client::new();
 
     'connect: loop {
         if !running.load(Ordering::SeqCst) {
-            info!("🛑 Ctrl-C or SIGTERM signal detected, exiting...");
+            info!("🛑 Ctrl-C signal detected, exiting...");
             break;
         }
 
@@ -405,12 +274,8 @@ async fn main() -> Result<()> {
             continue;
         };
 
-        // The following code is a workaround for a problem described here:
-        // https://github.com/bluez/bluer/discussions/130#discussioncomment-8845113
-        debug!("Local address before: {:?}", stream.as_ref().local_addr()?);
         let mut i = 0;
         while stream.as_ref().local_addr()?.addr == bluer::Address::any() {
-            debug!("Waiting for local address...");
             tokio::time::sleep(Duration::from_secs(1)).await;
             i += 1;
             if i > 5 {
@@ -418,15 +283,11 @@ async fn main() -> Result<()> {
             }
         }
 
-        info!("Local address: {:?}", stream.as_ref().local_addr()?);
-        //info!("Remote address: {:?}", stream.peer_addr()?);
-        info!("Security: {:?}", stream.as_ref().security()?);
-
         info!("connected, poll interval: {}s", POLL_INTERVAL_SECS);
 
         for s in INIT {
             if let Err(_) = send_cmd(&mut stream, s.to_string()).await {
-                info!("INIT error, reconnect");
+                info!("INIT error, reconnecting");
                 continue 'connect;
             }
         }
@@ -439,36 +300,75 @@ async fn main() -> Result<()> {
             if poll_interval.elapsed() > Duration::from_secs(0) {
                 poll_interval = Instant::now() + Duration::from_secs_f32(POLL_INTERVAL_SECS);
 
-                let mut data = BatteryData::default();
-                for p in &params {
-                    debug!("Trying to obtain: {} ({})", p.desc, p.name);
-                    match get_param(&mut stream, p, &mut client).await {
-                        Ok(val) => {
-                            if p.name == "soc" || p.name == "ioniq_soc" || p.name == "ev6_soc" {
-                                data.battery_level_percentage = Some(val);
-                            } else if p.name == "external_temp" {
-                                data.external_temp_celsius = Some(val);
+                let mut metrics_map: HashMap<String, f32> = HashMap::new();
+
+                for pid_cfg in &vehicle_cfg.pids {
+                    debug!("Trying to obtain PID: {}", pid_cfg.pid);
+                    match get_raw_pid(&mut stream, pid_cfg).await {
+                        Ok(payload) => {
+                            if payload.is_empty() { continue; }
+                            
+                            for metric in &pid_cfg.fields {
+                                if let Some(val) = extract_value(&payload, metric) {
+                                    info!("Extracted {}: {}", metric.name, val);
+                                    metrics_map.insert(metric.name.clone(), val);
+                                } else {
+                                    warn!("Failed to extract {} (bounds check failed)", metric.name);
+                                }
                             }
                         }
                         Err(e) => {
-                            info!("GET PARAM error for: {}: {:?}", p.name, e);
+                            info!("GET PARAM error for {}: {:?}", pid_cfg.pid, e);
                             if e.kind() == std::io::ErrorKind::AddrNotAvailable {
                                 info!("CAN network down / car is sleeping... waiting 100s");
-                                poll_interval =
-                                    Instant::now() + Duration::from_secs_f32(CAR_SLEEP_INTERVAL_SECS);
+                                poll_interval = Instant::now() + Duration::from_secs_f32(CAR_SLEEP_INTERVAL_SECS);
                                 continue 'inner;
                             }
                             if e.kind() == std::io::ErrorKind::BrokenPipe
                                 || e.kind() == std::io::ErrorKind::TimedOut
                                 || e.kind() == std::io::ErrorKind::NotConnected
                             {
-                                info!("Broken pipe/TimedOut/NotConnected detected ... trying to reconnect");
+                                info!("Broken pipe/TimedOut/NotConnected detected... reconnecting");
                                 continue 'connect;
                             }
                         }
                     }
                 }
-                let _ = rest_save_param(&mut client, &data).await;
+
+                // POST Battery
+                if metrics_map.contains_key("battery_level_percentage") || metrics_map.contains_key("external_temp_celsius") {
+                    let data = BatteryData {
+                        battery_level_percentage: metrics_map.get("battery_level_percentage").copied(),
+                        external_temp_celsius: metrics_map.get("external_temp_celsius").copied(),
+                    };
+                    if let Err(e) = client.post("http://localhost/battery").json(&data).send().await {
+                        warn!("Failed to POST /battery: {}", e);
+                    }
+                }
+
+                // POST Odometer
+                if let Some(&odo) = metrics_map.get("odometer_km") {
+                    let data = OdometerData { odometer_km: odo, trip_km: None };
+                    if let Err(e) = client.post("http://localhost/odometer").json(&data).send().await {
+                        warn!("Failed to POST /odometer: {}", e);
+                    }
+                }
+
+                // POST TPMS
+                if metrics_map.contains_key("tire_fl_kpa") {
+                    let data = TirePressureData {
+                        pressures_kpa: vec![
+                            metrics_map.get("tire_fl_kpa").copied().unwrap_or(0.0),
+                            metrics_map.get("tire_fr_kpa").copied().unwrap_or(0.0),
+                            metrics_map.get("tire_rl_kpa").copied().unwrap_or(0.0),
+                            metrics_map.get("tire_rr_kpa").copied().unwrap_or(0.0),
+                        ]
+                    };
+                    if let Err(e) = client.post("http://localhost/tire-pressure").json(&data).send().await {
+                        warn!("Failed to POST /tire-pressure: {}", e);
+                    }
+                }
+                
                 debug!("Got all params, sleeping 10 secs for next cycle");
             }
 
