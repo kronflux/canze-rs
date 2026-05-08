@@ -7,6 +7,9 @@
 This small linux tool is intended to connect to Renault Zoe's CAN bus and provide some basic parameters.<br>
 Name of the project is inspired by (and a tribute to) a great [CanZE](https://canze.fisch.lu/) project.<br>
 
+#### Supported Vehicles:
+- Hyundai Ioniq 5
+
 #### This tool is provides the following four parameters:
 - SOC (state of charge)
 - Active power from the grid (when charging from AC)
@@ -39,4 +42,5 @@ A sample file should have the following contents:<br>
 ```
 [general]
 mac = 00:00:00:00:00:00  #enter your bluetooth dongle MAC here
+car = ioniq              # Options: 'ioniq'
 ```
