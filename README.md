@@ -4,26 +4,23 @@
 ![Hardware overview](images/canze-rs.webp)
 
 ## Description
-This small linux tool is intended to connect to Renault Zoe's CAN bus and provide some basic parameters.<br>
-Name of the project is inspired by (and a tribute to) a great [CanZE](https://canze.fisch.lu/) project.<br>
+This small linux tool is intended to connect to Renault Zoe's CAN bus via a Bluetooth ELM327 OBD2 adapter and push live battery telemetry data to a local REST endpoint (designed to integrate with `aa-proxy-rs`).<br>
+The of the project is inspired by (and a tribute to) a great [CanZE](https://canze.fisch.lu/) project.<br>
 
 #### Supported Vehicles:
 - Hyundai Ioniq 5
 - Kia EV6
 
-#### This tool is provides the following four parameters:
-- SOC (state of charge)
-- Active power from the grid (when charging from AC)
-- SOH (battery's state of health)
-- Total vehicle distance (odometer)
+#### This tool polls and transmits the following parameters:
+- SOC (State of Charge)
+- External Temperature
 
-It is intended to running constantly (as a daemon) sensing when the car's OBD dongle is in range.
-When the car is not in sleep mode (eg. when it is charging), then provides the parameters.
+It is intended to be orchestrated by the `aa-proxy-rs` daemon. When an Android Auto session begins, it connects to the OBD dongle and transmits the collected battery data via HTTP POST to `http://localhost/ev-battery-data`, which fulfills the telemetry requirements needed for Android Auto EV Routing.
 
 ## Usage
 ```
 canze-rs 0.1.0
-Renault Zoe parameter provider
+Renault Zoe EV battery data telemetry logger
 
 USAGE:
     canze-rs [OPTIONS]
@@ -42,6 +39,6 @@ The project uses a simple configuration file:<br>
 A sample file should have the following contents:<br>
 ```
 [general]
-mac = 00:00:00:00:00:00  #enter your bluetooth dongle MAC here
-car = ev6                # Options: 'ioniq' or 'ev6'
+mac = 00:00:00:00:00:00  # Enter your Bluetooth OBD2 Dongle MAC here
+car = ev6                # Options: 'ev6' or 'ioniq'
 ```
