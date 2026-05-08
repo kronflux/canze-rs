@@ -181,6 +181,45 @@ fn create_ioniq_params_table() -> Vec<Parameter> {
         ),
     ]
 }
+
+// Create parameter list for the Kia EV6
+fn create_ev6_params_table() -> Vec<Parameter> {
+    vec![
+        Parameter::new(
+            "ev6_soc",
+            "EV6 State of Charge",
+            Some("%"),
+            0x220105, // PID for EV6 SOC
+            0x7EC,    // Response address from ECU
+            0x7E4,    // ECU address (for ATSH command)
+            Box::new(|raw| {
+                let line = raw.split(|c| c == '\r' || c == '\n').find(|l| l.trim().starts_with("5:")).ok_or_else(|| Error::new(ErrorKind::InvalidData, format!("Missing line 5. Raw: {:?}", raw)))?;
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() < 2 { return Err(Error::new(ErrorKind::InvalidData, format!("Invalid format in line: {:?}", line))); }
+                let val = u32::from_str_radix(parts[1], 16).map_err(|_| Error::new(ErrorKind::InvalidData, format!("Hex parse error in line: {:?}", line)))?;
+                let x: f32 = val as f32 / 2.0;
+                if x == 0.0 {
+                    return Err(Error::new(ErrorKind::AddrNotAvailable, "CAN network down"));
+                }
+                Ok(x)
+            }),
+        ),
+        Parameter::new(
+            "external_temp",
+            "Outside Temperature",
+            Some("C"),
+            0x220100, 
+            0x7BB,    // ACU response    
+            0x7B3,    // ACU ECU
+            Box::new(|raw| {
+                let line = raw.split(|c| c == '\r' || c == '\n').find(|l| l.trim().starts_with("1:")).ok_or_else(|| Error::new(ErrorKind::InvalidData, format!("Missing line 1. Raw: {:?}", raw)))?;
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() < 5 { return Err(Error::new(ErrorKind::InvalidData, format!("Invalid format in line: {:?}", line))); }
+                let val = u32::from_str_radix(parts[4], 16).map_err(|_| Error::new(ErrorKind::InvalidData, format!("Hex parse error in line: {:?}", line)))?;
+                let x: f32 = (val as f32 / 2.0) - 40.0;
+                Ok(x)
+            }),
+        ),
     ]
 }
 
@@ -405,7 +444,7 @@ async fn main() -> Result<()> {
                     debug!("Trying to obtain: {} ({})", p.desc, p.name);
                     match get_param(&mut stream, p, &mut client).await {
                         Ok(val) => {
-                            if p.name == "soc" || p.name == "ioniq_soc" {
+                            if p.name == "soc" || p.name == "ioniq_soc" || p.name == "ev6_soc" {
                                 data.battery_level_percentage = Some(val);
                             } else if p.name == "external_temp" {
                                 data.external_temp_celsius = Some(val);
