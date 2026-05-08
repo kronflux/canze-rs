@@ -12,11 +12,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
-use tokio_postgres::NoTls;
 
-/// secs between polling
+// Secs between polling
 pub const POLL_INTERVAL_SECS: f32 = 10.0;
-/// secs between polling when car is in sleep mode or is not in range
+// Secs between polling when car is in sleep mode or is not in range
 pub const CAR_SLEEP_INTERVAL_SECS: f32 = 100.0;
 
 const INIT: &[&str] = &["ATZ", "ATE0", "ATAL", "ATCP18", "ATFCSD300000", "ATSP6"];
@@ -80,15 +79,6 @@ impl Parameter {
             convert,
         }
     }
-}
-
-#[derive(Clone)]
-pub struct Database {
-    pub name: String,
-    pub host: String,
-    pub dbname: String,
-    pub username: String,
-    pub password: String,
 }
 
 fn create_params_table() -> Vec<Parameter> {
@@ -222,11 +212,7 @@ pub async fn send_cmd(stream: &mut Stream, cmd: String) -> io::Result<Option<Vec
     Ok(out)
 }
 
-async fn rest_save_param(
-    client: &mut reqwest::Client,
-    name: &str,
-    val: f32,
-) -> Result<()> {
+async fn rest_save_param(client: &mut reqwest::Client, name: &str, val: f32) -> Result<()> {
     // fill JSON struct
     let data = BatteryData {
         battery_level_percentage: val,
@@ -240,23 +226,6 @@ async fn rest_save_param(
 
     info!("Response: {}", response.text().await?);
 
-    Ok(())
-}
-
-async fn influx_save_param(
-    client: &mut tokio_postgres::Client,
-    name: &str,
-    val: f32,
-) -> Result<()> {
-    if let Err(e) = client
-        .execute(
-            &format!("INSERT INTO {name} (value) VALUES ($1)"),
-            &[&(val as f64)],
-        )
-        .await
-    {
-        error!("postgres: error inserting: {:?}", e);
-    }
     Ok(())
 }
 
@@ -307,25 +276,6 @@ pub async fn get_param(
     Ok(())
 }
 
-fn config_read_postgres(conf: Ini) -> std::result::Result<Database, Box<dyn std::error::Error>> {
-    match conf.section(Some("postgres".to_owned())) {
-        Some(section) => Ok(Database {
-            name: "🦏 postgres".to_string(),
-            host: section.get("host").ok_or("missing `host`")?.to_string(),
-            dbname: section.get("dbname").ok_or("missing `dbname`")?.to_string(),
-            username: section
-                .get("username")
-                .ok_or("missing `username`")?
-                .to_string(),
-            password: section
-                .get("password")
-                .ok_or("missing `password`")?
-                .to_string(),
-        }),
-        None => Err("missing [postgres] config section")?,
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -341,22 +291,11 @@ async fn main() -> Result<()> {
     };
     let mac = get_config_string(conf.clone(), "mac", None)?;
 
-    let db = match config_read_postgres(conf.clone()) {
-        Ok(db) => db,
-        Err(e) => {
-            return Err(format!("Config error [postgres]: {}", e).into());
-        }
-    };
-    let connectionstring = format!(
-        "postgres://{}:{}@{}/{}",
-        db.username, db.password, db.host, db.dbname
-    );
-
-    //parse target mac address for bluetooth
+    // Parse target mac address for bluetooth
     let target_addr: Address = mac.parse().expect("invalid address");
     let target_sa = SocketAddr::new(target_addr, 1u8);
 
-    //Ctrl-C / SIGTERM support
+    // Ctrl-C / SIGTERM support
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
     ctrlc::set_handler(move || {
@@ -367,14 +306,6 @@ async fn main() -> Result<()> {
     let params = create_params_table();
     let mut poll_interval = Instant::now();
 
-    /*let (mut client, connection) = tokio_postgres::connect(&connectionstring, NoTls).await?;
-    // The connection object performs the actual communication with the database,
-    // so spawn it off to run on its own.
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            error!("connection error: {}", e);
-        }
-    });*/
     let mut client = Client::new();
 
     'connect: loop {
@@ -393,7 +324,7 @@ async fn main() -> Result<()> {
             continue;
         };
 
-        // the following code is a workaround for a problem described here:
+        // The following code is a workaround for a problem described here:
         // https://github.com/bluez/bluer/discussions/130#discussioncomment-8845113
         debug!("Local address before: {:?}", stream.as_ref().local_addr()?);
         let mut i = 0;
