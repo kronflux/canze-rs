@@ -149,11 +149,14 @@ pub fn get_payload(response: &str) -> Vec<u8> {
     let mut is_first = true;
 
     for frame in frames {
-        let data_str = if frame.contains(':') {
-            frame.split(':').nth(1).unwrap()
+        let mut data_str = if frame.contains(':') {
+            frame.split(':').nth(1).unwrap().to_string()
         } else {
-            frame
+            frame.to_string()
         };
+        
+        // Strip spaces from ELM327 hex dumps
+        data_str = data_str.replace(" ", "");
         
         if is_first && data_str.len() <= 3 {
             is_first = false;
