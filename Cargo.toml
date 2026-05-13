@@ -1,17 +1,17 @@
 [package]
 name = "canze-rs"
-authors = ['Mariusz Białończyk']
-version = "0.1.0"
+authors = ['Mariusz Białończyk', 'Richard M']
+version = "0.2.0"
 edition = "2021"
 license = 'GPL-2.0'
-description = 'Renault Zoe influxdb parameters logger'
-documentation = 'https://github.com/manio/canze-rs'
+description = 'EV OBD-II telemetry logger'
+documentation = 'https://github.com/kronflux/canze-rs'
 readme = 'README.md'
 include = ['/README.md', '/LICENSE', '/Cargo.toml', '/Cargo.lock', '/src/*.rs', 'images/*']
-keywords = ['canze', 'can', 'renault', 'zoe', 'ze']
+keywords = ['canze', 'can', 'renault', 'zoe', 'ze', 'ev', 'obd', 'ioniq', 'ev6', 'mg4', 'niro', 'kia', 'hyundai', 'aa-proxy-rs']
 categories = ['command-line-utilities']
-homepage = 'https://github.com/manio/canze-rs'
-repository = 'https://github.com/manio/canze-rs'
+homepage = 'https://github.com/kronflux/canze-rs'
+repository = 'https://github.com/kronflux/canze-rs'
 
 [dependencies]
 log = "0.4.1"
