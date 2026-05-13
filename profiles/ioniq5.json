@@ -12,6 +12,13 @@
           "length": 1,
           "multiplier": 0.5,
           "offset": 0.0
+        },
+        {
+          "name": "battery_level_wh",
+          "byte_index": 12,
+          "length": 2,
+          "multiplier": 10.0,
+          "offset": 0.0
         }
       ]
     },

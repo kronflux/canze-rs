@@ -41,6 +41,8 @@ struct BatteryData {
     external_temp_celsius: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     battery_capacity_wh: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    battery_level_wh: Option<f32>,
 }
 
 #[derive(Debug, Serialize, Default, Clone)]
@@ -346,11 +348,12 @@ async fn main() -> Result<()> {
                 }
 
                 // POST Battery
-                if metrics_map.contains_key("battery_level_percentage") || metrics_map.contains_key("external_temp_celsius") {
+                if metrics_map.contains_key("battery_level_percentage") || metrics_map.contains_key("external_temp_celsius") || metrics_map.contains_key("battery_level_wh") {
                     let data = BatteryData {
                         battery_level_percentage: metrics_map.get("battery_level_percentage").copied(),
                         external_temp_celsius: metrics_map.get("external_temp_celsius").copied(),
                         battery_capacity_wh,
+                        battery_level_wh: metrics_map.get("battery_level_wh").copied(),
                     };
                     if let Err(e) = client.post("http://localhost/battery").json(&data).send().await {
                         warn!("Failed to POST /battery: {}", e);
