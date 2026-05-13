@@ -39,6 +39,8 @@ struct BatteryData {
     battery_level_percentage: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     external_temp_celsius: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    battery_capacity_wh: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Default, Clone)]
@@ -235,6 +237,11 @@ async fn main() -> Result<()> {
     };
     let mac = get_config_string(&conf, "mac", Some("general"))?;
     let car_model = get_config_string(&conf, "car", Some("general"))?;
+    
+    // Optional parameter
+    let battery_capacity_wh: Option<u32> = get_config_string(&conf, "battery_capacity_wh", Some("general"))
+        .ok()
+        .and_then(|s| s.parse().ok());
 
     info!("Configured for car model: <b><green>{}</>", &car_model);
     
@@ -343,6 +350,7 @@ async fn main() -> Result<()> {
                     let data = BatteryData {
                         battery_level_percentage: metrics_map.get("battery_level_percentage").copied(),
                         external_temp_celsius: metrics_map.get("external_temp_celsius").copied(),
+                        battery_capacity_wh,
                     };
                     if let Err(e) = client.post("http://localhost/battery").json(&data).send().await {
                         warn!("Failed to POST /battery: {}", e);
